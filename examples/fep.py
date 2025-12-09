@@ -129,13 +129,53 @@ class LambdaSchedule:
         
         return e_lambdas, s_lambdas
     
+   # @staticmethod
+   # def split_for_multi_gpu(e_lambdas: np.ndarray, s_lambdas: np.ndarray,
+   #                        gpu_id: int, n_gpus: int) -> Tuple[np.ndarray, np.ndarray]:
+   #     """Split lambda schedules across multiple GPUs with overlap"""
+   #     e_split = np.array_split(e_lambdas, n_gpus)
+   #     s_split = np.array_split(s_lambdas, n_gpus)
+   #     
+   #     if gpu_id == 0:
+   #         # First GPU: add overlap with next
+   #         e_out = np.concatenate([e_split[gpu_id], [e_split[gpu_id + 1][0]]])
+   #         s_out = np.concatenate([s_split[gpu_id], [s_split[gpu_id + 1][0]]])
+   #     elif gpu_id == n_gpus - 1:
+   #         # Last GPU: add overlap with previous
+   #         e_out = np.concatenate([[e_split[gpu_id - 1][-1]], e_split[gpu_id]])
+   #         s_out = np.concatenate([[s_split[gpu_id - 1][-1]], s_split[gpu_id]])
+   #     else:
+   #         # Middle GPUs: add overlap with both neighbors
+   #         e_out = np.concatenate([
+   #             [e_split[gpu_id - 1][-1]], 
+   #             e_split[gpu_id], 
+   #             [e_split[gpu_id + 1][0]]
+   #         ])
+   #         s_out = np.concatenate([
+   #             [s_split[gpu_id - 1][-1]], 
+   #             s_split[gpu_id], 
+   #             [s_split[gpu_id + 1][0]]
+   #         ])
+   #     
+   #     return e_out, s_out
+
     @staticmethod
     def split_for_multi_gpu(e_lambdas: np.ndarray, s_lambdas: np.ndarray,
-                           gpu_id: int, n_gpus: int) -> Tuple[np.ndarray, np.ndarray]:
-        """Split lambda schedules across multiple GPUs with overlap"""
+                           gpu_id: int, n_gpus: int) -> Tuple[np.ndarray, np.ndarray, int]:
+        """
+        Split lambda schedules across multiple GPUs with overlap
+
+        Returns:
+            e_out: Electrostatic lambdas for this GPU
+            s_out: Steric lambdas for this GPU
+            offset: Starting index in the original lambda array
+        """
         e_split = np.array_split(e_lambdas, n_gpus)
         s_split = np.array_split(s_lambdas, n_gpus)
-        
+
+        # Calculate offset (starting index in original array)
+        offset = sum(len(e_split[i]) for i in range(gpu_id))
+
         if gpu_id == 0:
             # First GPU: add overlap with next
             e_out = np.concatenate([e_split[gpu_id], [e_split[gpu_id + 1][0]]])
@@ -144,20 +184,22 @@ class LambdaSchedule:
             # Last GPU: add overlap with previous
             e_out = np.concatenate([[e_split[gpu_id - 1][-1]], e_split[gpu_id]])
             s_out = np.concatenate([[s_split[gpu_id - 1][-1]], s_split[gpu_id]])
+            offset -= 1  # Account for overlap window from previous GPU
         else:
             # Middle GPUs: add overlap with both neighbors
             e_out = np.concatenate([
-                [e_split[gpu_id - 1][-1]], 
-                e_split[gpu_id], 
+                [e_split[gpu_id - 1][-1]],
+                e_split[gpu_id],
                 [e_split[gpu_id + 1][0]]
             ])
             s_out = np.concatenate([
-                [s_split[gpu_id - 1][-1]], 
-                s_split[gpu_id], 
+                [s_split[gpu_id - 1][-1]],
+                s_split[gpu_id],
                 [s_split[gpu_id + 1][0]]
             ])
-        
-        return e_out, s_out
+            offset -= 1  # Account for overlap window from previous GPU
+
+        return e_out, s_out, offset
 
 
 class FEPRunner:
@@ -172,7 +214,9 @@ class FEPRunner:
             e_lambdas: np.ndarray,
             s_lambdas: np.ndarray,
             output_dir: str = "FEP",
-            skip_windows: Optional[List[int]] = None):
+            skip_windows: Optional[List[int]] = None,
+            window_offset=0):
+
         """
         Run FEP calculations across all lambda windows
         
@@ -182,6 +226,8 @@ class FEPRunner:
             s_lambdas: Steric lambda values
             output_dir: Base directory for FEP outputs
             skip_windows: List of window indices to skip (for multi-GPU)
+            window_offset: Offset for window numbering (for multi-GPU)
+
         """
         if len(e_lambdas) != len(s_lambdas):
             raise ValueError("Lambda arrays must have same length")
@@ -194,14 +240,18 @@ class FEPRunner:
         print("<<-------- FEP Simulation ------->>")
         print(f"Performing FEP on atoms: {self.fep.atoms_to_fep}")
         print(f"Number of lambda windows: {len(e_lambdas)}")
-        print("<<-------------------------------->>")
+        print("<<-------------------------------->>") 
+
         
         for window_idx, (elmb, slmb) in enumerate(zip(e_lambdas, s_lambdas)):
             if window_idx in skip_windows:
                 continue
             
+            # Calculate global window index
+            global_idx = window_offset + window_idx
+
             # Setup window directory
-            window_dir = f"window_{window_idx:03d}_e{elmb:.6f}_s{slmb:.6f}"
+            window_dir = f"lambda_{global_idx:03d}"
             window_path = os.path.join(cwd, output_dir, window_dir)
             os.makedirs(window_path, exist_ok=True)
             os.chdir(window_path)
@@ -297,16 +347,17 @@ def main():
     # ========================================================================
     
     # Input files
-    path = "/Users/blake/Data/aspirin/hydration-free-energy"
-    coord_file = "coord.pdb"
-    coord_file = f"{path}/{coord_file}"
-    forcefield_file = "aspirin.xml"
-    forcefield_file = f"{path}/{forcefield_file}"
+    coord_file = sys.argv[1]
+    forcefield_file = sys.argv[2]
+
+    # Multi-GPU settings
+    use_multi_gpu = True
+    n_gpus = 8
+    gpu_id = int(os.environ["SYSTEM_ID"])  # Which GPU this process uses
     
     # Platform
-    platform = mm.Platform.getPlatformByName('OpenCL')
-    properties = {}
-#    properties = {'Precision': 'mixed', 'DeviceIndex': str(gpu_id)}
+    platform = mm.Platform.getPlatformByName('HIP')
+    properties = {'Precision': 'mixed', 'DeviceIndex': str(0)}
     
     # Thermodynamic state
     temperature = 300.0  # Kelvin
@@ -314,12 +365,12 @@ def main():
     
     # Integration parameters
     timestep = 0.001  # picoseconds
-    n_steps = 100
+    n_steps = 10000000
     trel = 1.0  # thermostat relaxation time (1/ps)
     
     # Output settings
-    traj_frequency = 10  # steps between trajectory frames
-    thermo_frequency = 10  # steps between thermodynamic outputs
+    traj_frequency = 10000  # steps between trajectory frames
+    thermo_frequency = 10000  # steps between thermodynamic outputs
    
     pdb = app.PDBFile(coord_file)
     residue_id_to_fep = 1
@@ -336,23 +387,20 @@ def main():
         restraint_k=14473.0  # kJ/mol/nm^2
     )
 
-    fep_config = FEPConfig(filename = "fep.out", report_interval = 10)
+    fep_config = FEPConfig(filename = "fep.out", report_interval = 1000)
     
-    # Multi-GPU settings
-    use_multi_gpu = False
-    n_gpus = 1
-    gpu_id = int(sys.argv[1])  # Which GPU this process uses
     
     # ========================================================================
     # LAMBDA SCHEDULE SETUP
     # ========================================================================
     
     e_lambdas, s_lambdas = LambdaSchedule.get_default_schedules()
-    e_lambdas = [1.0, 0.5, 0.0, 0.0, 0.0]
-    s_lambdas = [1.0, 1.0, 1.0, 0.5, 0.0]
-    
+    # e_lambdas = [1.0, 0.5, 0.0, 0.0, 0.0]
+    # s_lambdas = [1.0, 1.0, 1.0, 0.5, 0.0]
+   
+    window_offset = 0
     if use_multi_gpu:
-        e_lambdas, s_lambdas = LambdaSchedule.split_for_multi_gpu(
+        e_lambdas, s_lambdas, window_offset = LambdaSchedule.split_for_multi_gpu(
             e_lambdas, s_lambdas, gpu_id, n_gpus
         )
         skip_windows = get_skip_windows_for_gpu(gpu_id, n_gpus, len(e_lambdas))
@@ -405,7 +453,8 @@ def main():
         lambda: build_system()[:3],  # Return only system, topology, positions
         e_lambdas,
         s_lambdas,
-        skip_windows=skip_windows
+        skip_windows=skip_windows,
+        window_offset=window_offset
     ):
         # Build integrator (not modified by FEP)
         _, _, _, integrator = build_system()
@@ -421,7 +470,6 @@ def main():
         
         # Initialize state
         simulation.context.setPositions(window_data['positions'])
-        e = simulation.context.getState(getEnergy=True).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole) 
         
         simulation.context.setVelocitiesToTemperature(
             temperature * unit.kelvin, 
@@ -431,7 +479,7 @@ def main():
         # Add reporters
         simulation.reporters.append(
             app.StateDataReporter(
-                f'output.{window_data["window_idx"]:03d}.dat',
+                'output.dat',
                 thermo_frequency,
                 step=True,
                 time=True,
@@ -445,7 +493,7 @@ def main():
         
         simulation.reporters.append(
             app.DCDReporter(
-                f'trajectory.{window_data["window_idx"]:03d}.dcd',
+                'trajectory.dcd',
                 traj_frequency
             )
         )
@@ -479,7 +527,6 @@ def main():
                     properties
                 )
                 sim_prev.context.setPositions(window_data['positions'])
-                e = sim_prev.context.getState(getEnergy=True).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole) 
                 contexts.append(sim_prev.context)
             
             if window_data['system_next']:
@@ -491,7 +538,6 @@ def main():
                     properties
                 )
                 sim_next.context.setPositions(window_data['positions'])
-                e = sim_next.context.getState(getEnergy=True).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole) 
                 contexts.append(sim_next.context)
             
             is_first = window_data['window_idx'] == 0
@@ -506,7 +552,7 @@ def main():
         simulation.step(n_steps)
         
         # Save checkpoint
-        simulation.saveCheckpoint(f'checkpoint.{window_data["window_idx"]:03d}.chk')
+        simulation.saveCheckpoint('checkpoint.chk')
         
         print(f"Window {window_data['window_idx']} complete!\n")
 
