@@ -21,7 +21,7 @@ DEFAULT_CONFIG = FEPConfig()
 
 
 class FEPReporter:
-    FMT = "{:20.8}"
+    FMT = "{:20.8f}"
     HEADER = "{:>20}"
 
     def __init__(
@@ -29,7 +29,7 @@ class FEPReporter:
     ) -> None:
         LOG.debug("Intialising FEPReporter")
         self.contexts = contexts
-        self.n_contexts = len(contexts)
+        self.n_contexts = len([c for c in contexts if c is not None])
         self.config = config
         self.file = File(filename=self.config.filename)
         header, self.fmt = self.init_file_formatting()
@@ -41,7 +41,7 @@ class FEPReporter:
     def init_file_formatting(self) -> Tuple[str, str]:
         header = f"{'n':>10}"
         fmt = "{:>10}"
-        for i in range(self.n_contexts):
+        for i in range(self.n_contexts + 1):
             header += f" {FEPReporter.HEADER.format(f'E{i}')}"
             fmt += f" {FEPReporter.FMT}"
         return header, fmt
@@ -64,6 +64,8 @@ class FEPReporter:
         main_energy = state.getPotentialEnergy().value_in_unit(unit.kilojoules_per_mole)
         energies = [main_energy]
         for idx, context in enumerate(self.contexts):
+            if context is None:
+                continue
             try:
                 context.setPositions(main_positions)
             except Exception as e:
@@ -71,7 +73,7 @@ class FEPReporter:
                     f"Could not set main positions into context {idx}"
                 ) from e
             try:
-                idx_energy = state.getPotentialEnergy().value_in_unit(
+                idx_energy = context.getState(getEnergy=True).getPotentialEnergy().value_in_unit(
                     unit.kilojoules_per_mole
                 )
             except Exception as e:
