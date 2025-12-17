@@ -39,7 +39,7 @@ class HILLSReporter:
             + str(n_cvs + 3)
             + ":<16}\n"
         )
-        self._out.write(f"#! FIELDS time{str_cv} {str_s} heigh biasf\n")
+        self._out.write(f"#! FIELDS time{str_cv} {str_s} height biasf\n")
         return fmt_str
 
 
