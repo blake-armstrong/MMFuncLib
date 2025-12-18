@@ -16,7 +16,6 @@ class HILLSReporter:
         self.sync()
         self.gaussian_widths = [v.biasWidth for v in self.meta.variables]
         self.hills_fmt = self.init_header()
-        print(self.hills_fmt)
 
     def sync(self):
         self.meta._syncWithDisk()
