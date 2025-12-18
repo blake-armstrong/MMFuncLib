@@ -13,12 +13,8 @@ class HILLSReporter:
         self.meta = meta
         if self.meta.frequency != reportInterval:
             raise ValueError("HILL frequency must be same as Meta frequency")
-        self.sync()
         self.gaussian_widths = [v.biasWidth for v in self.meta.variables]
         self.hills_fmt = self.init_header()
-
-    def sync(self):
-        self.meta._syncWithDisk()
 
     def init_header(self) -> str:
         n_cvs = len(self.meta.variables)
@@ -60,7 +56,6 @@ class HILLSReporter:
 
     def report(self, simulation, state):
 
-        self.sync()
         self.meta._force.updateParametersInContext(simulation.context)
 
         position = self.meta._force.getCollectiveVariableValues(simulation.context)
